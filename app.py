@@ -126,15 +126,185 @@ if df1 is None:
     st.stop()
 
 # 展示预览
-with st.expander("📄 文件预览", expanded=True):
-    st.markdown("**表1（第一个文件）字段与示例：**")
-    st.write(", ".join(df1.columns))
-    st.dataframe(df1.head(10), width="stretch")
-    if df2 is not None:
-        st.markdown("---")
-        st.markdown("**表2（第二个文件）字段与示例：**")
-        st.write(", ".join(df2.columns))
-        st.dataframe(df2.head(10), width="stretch")
+with tab_check:
+    st.markdown("### ✅ 数据校对（两个表间差异对比）")
+
+    if df2 is None:
+        st.info("要使用数据校对功能，请上传两个文件（表1 和 表2）。")
+    else:
+        st.markdown(
+            "说明：使用索引列匹配两表记录，然后对指定字段逐列比对，列出不一致，并给出 Excel 对账公式示例。"
+        )
+
+        # 1️⃣ 索引列输入（你的例子：Item Number, 规格型号）
+        key_text = st.text_input(
+            "索引列（表1和表2都存在的列名，逗号分隔，例如：Item Number, 规格型号）：",
+            value="Item Number, 规格型号",
+            key="q_keys",
+        )
+
+        # 2️⃣ 要校对字段映射
+        st.caption(
+            "要校对的字段映射：可以写同名列（如：未税金额），"
+            "也可以写“表1列=表2列”（如：开票型号=发票型号）。多个用逗号分隔。"
+        )
+        mapping_text = st.text_input(
+            "示例：开票型号=开票型号, 开票名称=开票名称, 开票数量=数量, 未税单价=单价, 未税金额=不含税金额",
+            value="开票型号, 开票名称, 开票数量, 未税单价, 未税金额",
+            key="q_mappings",
+        )
+
+        go_check = st.button("执行校对", key="btn_check")
+
+        if go_check:
+            # 解析索引列
+            raw_keys = (key_text or "").replace("，", ",")
+            keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+            not_in_1 = [k for k in keys if k not in df1.columns]
+            not_in_2 = [k for k in keys if k not in df2.columns]
+
+            if not keys or not_in_1 or not_in_2:
+                msg = []
+                if not keys:
+                    msg.append("没有解析出有效的索引列")
+                if not_in_1:
+                    msg.append(f"以下索引列不在表1中：{', '.join(not_in_1)}")
+                if not_in_2:
+                    msg.append(f"以下索引列不在表2中：{', '.join(not_in_2)}")
+                st.error("；".join(msg))
+            else:
+                # 解析字段映射：支持
+                #   - "开票数量"              => (开票数量, 开票数量)
+                #   - "开票数量=数量"         => (开票数量, 数量)
+                raw_maps = (mapping_text or "").replace("，", ",")
+                tokens = [t.strip() for t in raw_maps.split(",") if t.strip()]
+                compare_pairs = []  # [(left_col, right_col), ...]
+
+                for token in tokens:
+                    if "=" in token:
+                        left_col, right_col = [x.strip() for x in token.split("=", 1)]
+                    else:
+                        left_col = right_col = token
+                    if left_col in df1.columns and right_col in df2.columns:
+                        compare_pairs.append((left_col, right_col))
+
+                if not compare_pairs:
+                    st.error("没有解析出有效的校对字段，请检查输入的列名/映射。")
+                else:
+                    # ====== 核心：按映射重命名表2，然后 merge ======
+                    left = df1.copy()
+                    right = df2.copy()
+
+                    # 把表2中要比对的列重命名成表1的列名，方便统一处理
+                    rename_dict = {
+                        right_col: left_col
+                        for (left_col, right_col) in compare_pairs
+                        if left_col != right_col
+                    }
+                    right_renamed = right.rename(columns=rename_dict)
+
+                    # 外连接，suffixes 确保我们得到 col_表1 / col_表2 两列
+                    merged = left.merge(
+                        right_renamed,
+                        on=keys,
+                        how="outer",
+                        indicator=True,
+                        suffixes=("_表1", "_表2"),
+                    )
+
+                    only_in_1 = merged[merged["_merge"] == "left_only"]
+                    only_in_2 = merged[merged["_merge"] == "right_only"]
+                    both = merged[merged["_merge"] == "both"].copy()
+
+                    # 要比较的“统一列名”（已经是表1那一侧的名字）
+                    compare_cols = list({left_col for (left_col, _) in compare_pairs})
+
+                    mismatch_details = []
+                    for col in compare_cols:
+                        col_l = f"{col}_表1"
+                        col_r = f"{col}_表2"
+                        if col_l in both.columns and col_r in both.columns:
+                            l_vals = both[col_l]
+                            r_vals = both[col_r]
+                            equal = (l_vals == r_vals) | (l_vals.isna() & r_vals.isna())
+                            diff_rows = both[~equal][keys + [col_l, col_r]]
+                            if not diff_rows.empty:
+                                mismatch_details.append((col, diff_rows.head(200)))
+
+                    # ====== 展示结果 ======
+                    st.markdown("### 🔎 校对结果总览")
+                    st.write(f"- 使用索引列：{', '.join(keys)}")
+                    st.write(f"- 仅在表1中的记录数：{len(only_in_1)}")
+                    st.write(f"- 仅在表2中的记录数：{len(only_in_2)}")
+                    st.write(f"- 索引匹配成功的记录数：{len(both)}")
+
+                    if len(only_in_1) > 0:
+                        st.markdown("**仅在表1中的样例记录（最多 20 行）：**")
+                        st.dataframe(only_in_1[keys].head(20), width="stretch")
+
+                    if len(only_in_2) > 0:
+                        st.markdown("**仅在表2中的样例记录（最多 20 行）：**")
+                        st.dataframe(only_in_2[keys].head(20), width="stretch")
+
+                    if mismatch_details:
+                        st.markdown("### ❌ 指定字段不一致明细")
+                        for col, diff in mismatch_details:
+                            st.markdown(f"**字段：{col}**（显示前 200 条差异）")
+                            st.dataframe(diff, width="stretch")
+                    else:
+                        st.markdown("### ✅ 在匹配行中，指定字段全部一致（基于当前映射）")
+
+                    # ====== 生成 Excel 对账公式示例（保持原思路） ======
+                    # 用 Qwen 给几条通用 XLOOKUP / VLOOKUP 例子
+                    example_cols = ", ".join(compare_cols[:5])
+                    prompt_excel = f"""
+你是一个 Excel 对账公式助手。
+有两个工作表：Sheet1(表1) 和 Sheet2(表2)。
+使用索引列 {', '.join(keys)} 做匹配，需要对字段 {example_cols} 做一致性校验。
+
+请给出 2-4 条通用的 Excel 公式示例，帮助用户：
+1. 检查某个索引是否存在于 Sheet2；
+2. 检查 Sheet1 某字段与 Sheet2 对应字段是否一致。
+
+要求：
+- 用简短中文解释思路。
+- 用 XLOOKUP 或 VLOOKUP+IF。
+- 使用绝对列引用，例如 Sheet2!$A:$A。
+输出严格 JSON：
+{{
+  "explanation": "一句或几句说明整体校对思路",
+  "excel_formulas": ["公式1", "公式2", "公式3"]
+}}
+只返回 JSON。
+"""
+                    messages_excel2 = [
+                        {"role": "system", "content": "你擅长生成用于两表对账的 Excel 公式。"},
+                        {"role": "user", "content": prompt_excel},
+                    ]
+
+                    explanation2 = ""
+                    excel_formulas2 = []
+                    try:
+                        raw2 = call_qwen(messages_excel2, max_tokens=500, temperature=0)
+                        try:
+                            j2 = json.loads(raw2)
+                            explanation2 = j2.get("explanation", "") or ""
+                            excel_formulas2 = j2.get("excel_formulas", []) or []
+                        except json.JSONDecodeError:
+                            explanation2 = raw2
+                            excel_formulas2 = []
+                    except Exception as e:
+                        explanation2 = f"（生成 Excel 对账公式示例失败：{e}）"
+
+                    st.markdown("### 📎 Excel 对账公式示例")
+                    if explanation2:
+                        st.markdown(f"**说明：** {explanation2}")
+                    if excel_formulas2:
+                        for f in excel_formulas2:
+                            st.code(f, language="excel")
+                    else:
+                        st.caption("（暂未生成 Excel 对账公式示例，可参考上方差异结果自行编写。）")
+
 
 
 # ========== Tab 布局：智能查询 / 数据校对 ==========
@@ -434,3 +604,4 @@ with tab_check:
                             st.code(f, language="excel")
                     else:
                         st.caption("（暂未生成 Excel 对账公式示例，可参考上方差异结果自行编写。）")
+
