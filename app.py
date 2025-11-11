@@ -26,7 +26,7 @@ MODEL_NAME = "qwen3-max"
 
 # ================== 通用：带重试的 LLM 调用 ==================
 
-def call_qwen(messages, max_tokens=800, temperature=0):
+def call_qwen(messages, max_tokens=3000, temperature=0):
     last_err = None
     for _ in range(2):
         try:
@@ -605,3 +605,4 @@ with tab_compare:
                                         "说明：系统不自动判断是否一致，只把两个表中对应字段并排展示，"
                                         "由你自行查看或导出后用 Excel 做更复杂比对。"
                                     )
+
