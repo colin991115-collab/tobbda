@@ -22,7 +22,7 @@ client = OpenAI(
     timeout=60.0,
 )
 
-MODEL_NAME = "qwen3-max"
+MODEL_NAME = "qwen3-32b"
 
 
 # ================== 通用：带重试的 Qwen 调用 ==================
@@ -520,3 +520,4 @@ with tab_check:
                                     "说明：每个字段会以“字段_表1 / 字段_表2”并排展示，"
                                     "你可以直接肉眼或导出后用 Excel 比较是否一致。"
                                 )
+
