@@ -22,7 +22,7 @@ client = OpenAI(
     timeout=60.0,
 )
 
-MODEL_NAME = "qwen3-32b"
+MODEL_NAME = "qwen3-max"
 
 
 # ================== 通用：带重试的 Qwen 调用 ==================
