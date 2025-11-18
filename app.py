@@ -48,7 +48,8 @@ def call_qwen(messages, max_tokens=800, temperature=0):
 
 # ================== 自动列映射：用前几行示例猜两表对应列 ==================
 
-def build_column_samples(df, n=5):  # ★ 改成默认取前 5 行
+def build_column_samples(df, n=5):
+    """取前 n 行示例，用于让模型推断列的语义。"""
     head = df.head(n)
     samples = {}
     for col in df.columns:
@@ -62,7 +63,6 @@ def infer_column_mapping(df1, df2):
     使用 Qwen 根据列名 + 前几行样例，推断表1列 到 表2列 的语义映射。
     返回 dict: {left_col: right_col}
     """
-    # ★ 使用更多示例行，提升语义匹配的稳定性
     left_samples = build_column_samples(df1, n=5)
     right_samples = build_column_samples(df2, n=5)
 
@@ -134,7 +134,6 @@ def normalize_key_columns(df: pd.DataFrame, cols):
     for c in cols:
         if c in df.columns:
             series = df[c].astype(str)
-            # 替换全角空格，再 strip
             series = series.str.replace("\u3000", " ", regex=False).str.strip()
             df[c] = series
     return df
@@ -150,7 +149,7 @@ st.set_page_config(
 
 st.title("📊 智能数据查询 & 数据对照助手")
 st.caption(
-    "上传 1~2 个 Excel/CSV：Tab1 智能查询，Tab2 自动对齐相关列并并排展示，方便人工核对。"
+    "上传 1~2 个 Excel/CSV：Tab1 智能查询，Tab2 自动对齐相关列并并排展示，支持手动补充映射。"
 )
 
 # ================== 状态初始化 ==================
@@ -225,16 +224,17 @@ if df1 is None:
     st.info("请至少上传一个文件。")
     st.stop()
 
-# 自动映射（如果有两个表且还没算过）
+# 自动映射（如果有两个表且还没算过，或者 mapping 为空）
 if df2 is not None and not st.session_state.auto_mapping:
     with st.spinner("正在自动分析两表字段对应关系（读取前 5 行示例）..."):
         st.session_state.auto_mapping = infer_column_mapping(df1, df2)
 
 auto_mapping = st.session_state.auto_mapping
 
-# ================== 预览上传的表 & 自动映射 ==================
 
-with st.expander("📄 文件预览 & 自动字段映射", expanded=True):
+# ================== 预览上传的表 & 自动映射 + 未映射字段 + 手动编辑 ==================
+
+with st.expander("📄 文件预览 & 字段映射配置", expanded=True):
     st.markdown("**表1 字段 & 示例（前10行）：**")
     st.write(", ".join(df1.columns))
     st.dataframe(df1.head(10), width="stretch")
@@ -245,6 +245,7 @@ with st.expander("📄 文件预览 & 自动字段映射", expanded=True):
         st.write(", ".join(df2.columns))
         st.dataframe(df2.head(10), width="stretch")
 
+        # 自动推断映射展示
         if auto_mapping:
             st.markdown("---")
             st.markdown("**自动推断的字段映射（表1列 → 表2列）：**")
@@ -252,6 +253,61 @@ with st.expander("📄 文件预览 & 自动字段映射", expanded=True):
             st.dataframe(pd.DataFrame(rows), width="stretch")
         else:
             st.caption("（暂未推断出可靠映射，如需对照请确保列名尽量一致。）")
+
+        # === 列出未被自动映射的字段，方便人工补充 ===
+        mapped_left = set(auto_mapping.keys())
+        mapped_right = set(auto_mapping.values())
+
+        unmapped_left = [c for c in df1.columns if c not in mapped_left]
+        unmapped_right = [c for c in df2.columns if c not in mapped_right]
+
+        with st.expander("🔍 未自动匹配上的字段（可用于人工补充映射）", expanded=False):
+            st.markdown("**表1 中未被映射的列：**")
+            if unmapped_left:
+                st.write(", ".join(unmapped_left))
+            else:
+                st.write("（表1 所有列都已在映射中出现。）")
+
+            st.markdown("**表2 中未被映射的列：**")
+            if unmapped_right:
+                st.write(", ".join(unmapped_right))
+            else:
+                st.write("（表2 所有列都已在映射中出现。）")
+
+        # === 手动补充 / 修改字段映射（方案2 核心） ===
+        with st.expander("🛠 手动补充 / 调整字段映射", expanded=False):
+            st.caption(
+                "你可以在下表中编辑或新增映射关系：\n"
+                "- `表1列` 必须是表1中的列名\n"
+                "- `表2列` 必须是表2中的列名\n"
+                "修改完成后点击下面的按钮应用。"
+            )
+
+            mapping_df = pd.DataFrame(
+                [{"表1列": l, "表2列": r} for l, r in auto_mapping.items()]
+            )
+
+            edited = st.data_editor(
+                mapping_df,
+                num_rows="dynamic",  # 允许新增行
+                key="mapping_editor",
+            )
+
+            if st.button("应用映射修改", key="btn_apply_mapping"):
+                new_mapping = {}
+                for _, row in edited.iterrows():
+                    l = str(row.get("表1列", "")).strip()
+                    r = str(row.get("表2列", "")).strip()
+                    # 只保留合法的一对
+                    if l and r and (l in df1.columns) and (r in df2.columns):
+                        new_mapping[l] = r
+
+                st.session_state.auto_mapping = new_mapping
+                auto_mapping = new_mapping
+                st.success("字段映射已更新。请到『数据对照』Tab 重新生成对照视图。")
+
+    else:
+        st.info("当前只上传了一个文件，只能使用『智能查询』功能。")
 
 
 # ================== Tabs ==================
@@ -396,7 +452,7 @@ with tab_check:
             "使用方式：\n"
             "1. 在下方输入索引列（只用表1列名，例如：Item Number, 规格型号）；\n"
             "2. 输入你关心的字段（只用表1列名，如：开票型号, 开票名称, 未税金额 等）；\n"
-            "3. 系统会根据自动映射找到表2对应列，做一次合并，"
+            "3. 系统会根据自动/手动映射找到表2对应列，做一次合并，"
             "   把这些字段以“字段_表1 / 字段_表2”的形式并排展示，方便你自己判断是否一致。"
         )
 
@@ -425,8 +481,10 @@ with tab_check:
                 mapped_keys = {}
                 for k in keys:
                     if k in df1.columns:
-                        # 优先用自动映射，否则尝试同名
-                        r = auto_mapping.get(k, k if (df2 is not None and k in df2.columns) else None)
+                        # 优先用（自动+手动）映射，否则尝试同名
+                        r = auto_mapping.get(
+                            k, k if (df2 is not None and k in df2.columns) else None
+                        )
                         if r:
                             mapped_keys[k] = r
                 miss2 = [k for k in keys if k not in mapped_keys]
@@ -437,7 +495,7 @@ with tab_check:
                         msg.append("这些索引列不在表1中：" + ", ".join(miss1))
                     if miss2:
                         msg.append(
-                            "这些索引列在表2中找不到对应列（自动映射和同名都失败）："
+                            "这些索引列在表2中找不到对应列（自动/手动映射和同名都失败）："
                             + ", ".join(miss2)
                         )
                     st.error("；".join(msg))
@@ -447,7 +505,7 @@ with tab_check:
                     fields_left = [f.strip() for f in raw_fields.split(",") if f.strip()]
 
                     if not fields_left:
-                        # 没填就用所有自动映射字段里，排除索引列
+                        # 没填就用所有映射字段里，排除索引列
                         fields_left = [
                             l for l in auto_mapping.keys() if l not in keys
                         ]
@@ -471,13 +529,13 @@ with tab_check:
                         if not compare_pairs:
                             st.error(
                                 "没有找到可用的对照字段。"
-                                "请检查字段名是否正确，或确保两表列名足够接近以便自动映射。"
+                                "请检查字段名是否正确，或在上方『字段映射配置』里补充映射关系。"
                             )
                         else:
                             if skipped:
                                 st.caption("以下字段未被对照展示：" + "， ".join(skipped))
 
-                            # ★ 用清洗后的 key 列做匹配，提升对照成功率
+                            # 用清洗后的 key 列做匹配，提升对照成功率
                             left = normalize_key_columns(df1, keys)
                             right = normalize_key_columns(df2, list(mapped_keys.values()))
 
@@ -520,7 +578,7 @@ with tab_check:
                             st.write(f"- 仅在表2中的记录数：{len(only_in_2)}")
                             st.write(f"- 两表都存在（可对照）的记录数：{len(both)}")
 
-                            # ★ 不再 head(20)：完整展示（Streamlit 支持滚动）
+                            # 不再 head(20/200)：完整展示（Streamlit 自己滚动）
                             if len(only_in_1) > 0:
                                 st.markdown("**仅在表1中的记录（全部，仅展示索引列）：**")
                                 st.dataframe(only_in_1[keys], width="stretch")
@@ -533,12 +591,11 @@ with tab_check:
                             if len(both) == 0:
                                 st.write("没有匹配成功的记录。")
                             else:
-                                # ★ 不再限制前 200 行，展示所有匹配记录
                                 st.dataframe(
                                     both[view_cols],
                                     width="stretch"
                                 )
                                 st.caption(
                                     "说明：每个字段会以“字段_表1 / 字段_表2”并排展示，"
-                                    "你可以直接肉眼或导出后用 Excel 比较是否一致。"
+                                    "你可以直接肉眼核对，或者导出成 Excel 再进行比较。"
                                 )
