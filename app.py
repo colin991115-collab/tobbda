@@ -1,5 +1,6 @@
 import os
 import json
+import difflib
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
@@ -48,7 +49,7 @@ def call_qwen(messages, max_tokens=800, temperature=0):
 
 # ================== 自动列映射：用前3行示例猜两表对应列 ==================
 
-def build_column_samples(df, n=3):
+def build_column_samples(df, n=5):
     head = df.head(n)
     samples = {}
     for col in df.columns:
@@ -81,9 +82,10 @@ def infer_column_mapping(df1, df2):
 要求：
 1. 列名相同且示例值类型相似时优先匹配。
 2. 可以根据中文含义、英文缩写、示例值（如都是金额/数量/编码）推断。
-3. 没把握就不要匹配，宁缺毋滥。
-4. 每个表1列最多对应表2中的一个列；不要重复。
-5. 不要输出任何非 JSON 内容。
+3. 注意列值的数值/日期/文本特征；相同模式更可信。
+4. 没把握就不要匹配，宁缺毋滥。
+5. 每个表1列最多对应表2中的一个列；不要重复。
+6. 不要输出任何非 JSON 内容。
 """
     user_content = (
         "表1列与样例值：\n"
@@ -120,6 +122,21 @@ def infer_column_mapping(df1, df2):
         return {}
 
 
+def fallback_column_mapping(df1, df2, base_mapping):
+    """基于列名相似度的兜底匹配，避免 LLM 未覆盖的明显同名列。"""
+    mapping = dict(base_mapping)
+    used_right = set(mapping.values())
+    for left_col in df1.columns:
+        if left_col in mapping:
+            continue
+        candidates = [c for c in df2.columns if c not in used_right]
+        best = difflib.get_close_matches(left_col, candidates, n=1, cutoff=0.85)
+        if best:
+            mapping[left_col] = best[0]
+            used_right.add(best[0])
+    return mapping
+
+
 # ================== Streamlit 基本设置 ==================
 
 st.set_page_config(
@@ -145,6 +162,8 @@ if "schema2" not in st.session_state:
     st.session_state.schema2 = ""
 if "auto_mapping" not in st.session_state:
     st.session_state.auto_mapping = {}
+if "mapping_info" not in st.session_state:
+    st.session_state.mapping_info = {"base": 0, "fallback": 0}
 
 
 # ================== 上传数据：支持 1 或 2 个文件 ==================
@@ -207,8 +226,14 @@ if df1 is None:
 
 # 自动映射（如果有两个表且还没算过）
 if df2 is not None and not st.session_state.auto_mapping:
-    with st.spinner("正在自动分析两表字段对应关系（读取前 3 行示例）..."):
-        st.session_state.auto_mapping = infer_column_mapping(df1, df2)
+    with st.spinner("正在自动分析两表字段对应关系（读取前 5 行示例）..."):
+        base_mapping = infer_column_mapping(df1, df2)
+        enriched_mapping = fallback_column_mapping(df1, df2, base_mapping)
+        st.session_state.auto_mapping = enriched_mapping
+        st.session_state.mapping_info = {
+            "base": len(base_mapping),
+            "fallback": len(enriched_mapping) - len(base_mapping),
+        }
 
 auto_mapping = st.session_state.auto_mapping
 
@@ -230,6 +255,14 @@ with st.expander("📄 文件预览 & 自动字段映射", expanded=True):
             st.markdown("**自动推断的字段映射（表1列 → 表2列）：**")
             rows = [{"表1列": l, "表2列": r} for l, r in auto_mapping.items()]
             st.dataframe(pd.DataFrame(rows), width="stretch")
+            base_cnt = st.session_state.mapping_info.get("base", 0)
+            fb_cnt = st.session_state.mapping_info.get("fallback", 0)
+            if fb_cnt > 0:
+                st.caption(
+                    f"提示：其中 {fb_cnt} 组由列名相似度自动补全，请优先核验是否合理。"
+                )
+            elif base_cnt:
+                st.caption(f"共推断出 {base_cnt} 组字段对应关系。")
         else:
             st.caption("（暂未推断出可靠映射，如需对照请确保列名尽量一致。）")
 
@@ -501,21 +534,18 @@ with tab_check:
                             st.write(f"- 两表都存在（可对照）的记录数：{len(both)}")
 
                             if len(only_in_1) > 0:
-                                st.markdown("**仅在表1中的样例（最多20行，仅展示索引列）：**")
-                                st.dataframe(only_in_1[keys].head(20), width="stretch")
+                                st.markdown("**仅在表1中的记录（展示索引列）：**")
+                                st.dataframe(only_in_1[keys], width="stretch")
 
                             if len(only_in_2) > 0:
-                                st.markdown("**仅在表2中的样例（最多20行，仅展示索引列）：**")
-                                st.dataframe(only_in_2[keys].head(20), width="stretch")
+                                st.markdown("**仅在表2中的记录（展示索引列）：**")
+                                st.dataframe(only_in_2[keys], width="stretch")
 
-                            st.markdown("### 🔍 匹配记录的字段对照（前 200 行）")
+                            st.markdown("### 🔍 匹配记录的字段对照（全部行）")
                             if len(both) == 0:
                                 st.write("没有匹配成功的记录。")
                             else:
-                                st.dataframe(
-                                    both[view_cols].head(200),
-                                    width="stretch"
-                                )
+                                st.dataframe(both[view_cols], width="stretch")
                                 st.caption(
                                     "说明：每个字段会以“字段_表1 / 字段_表2”并排展示，"
                                     "你可以直接肉眼或导出后用 Excel 比较是否一致。"
